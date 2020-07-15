@@ -10,7 +10,7 @@ Models and results can be found at our ACL 2020 paper [FLAT: Chinese NER Using F
 
 
 # Requirement:
-======
+
 ```
 Python: 3.7.3
 PyTorch: 1.2.0
@@ -61,7 +61,7 @@ Cite:
 
 
 # 运行环境:
-======
+
 ```
 Python: 3.7.3
 PyTorch: 1.2.0
