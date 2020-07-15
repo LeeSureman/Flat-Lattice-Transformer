@@ -33,7 +33,7 @@ cd V0
 python preprocess.py (add '--clip_msra' if you need to train FLAT on MSRA NER dataset)
 python flat_main.py --dataset <dataset_name> (ontonotes, msra, weibo or resume)
 ```
-If you want to run the code on other datasets, you can write a function whose output format is like ''
+
 If you want to record experiment result, you can use fitlog:
 ```
 pip install fitlog
