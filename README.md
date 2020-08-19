@@ -82,7 +82,9 @@ Numpy: 1.16.4
 
       从[Google Drive](https://drive.google.com/file/d/1_Zlf0OAZKVdydk7loUpkzD2KPEotUE8u/view?usp=sharing) 或 [Baidu Pan](https://pan.baidu.com/s/1pLO6T9D) 下载字和 Bigram 的 embedding (gigaword_chn.all.a2b.{'uni' or 'bi'}.ite50.vec) 
 
-      从[Google Drive](https://drive.google.com/file/d/1K_lG3FlXTgOOf8aQ4brR9g3R40qi1Chv/view?usp=sharing) 或 [Baidu Pan](https://pan.baidu.com/s/1pLO6T9D) 下载词的 embedding (ctb.50d.vec)(yj)，从[Baidu Pan](https://pan.baidu.com/s/1luy-GlTdqqvJ3j-A4FcIOw) 下载词的embedding (sgns.merge.bigram.bz2)(ls)
+      从[Google Drive](https://drive.google.com/file/d/1K_lG3FlXTgOOf8aQ4brR9g3R40qi1Chv/view?usp=sharing) 或 [Baidu Pan](https://pan.baidu.com/s/1pLO6T9D) 下载词的 embedding (ctb.50d.vec)(yj)
+      
+      从[Baidu Pan](https://pan.baidu.com/s/1luy-GlTdqqvJ3j-A4FcIOw) 下载词的embedding (sgns.merge.bigram.bz2)(ls)
 
 2. 修改 `paths.py` 来添加预训练的 embedding 和你的数据集
 3. 运行下面的代码
