@@ -36,8 +36,8 @@ How to run the code?
 2. Modify the `paths.py` to add the pretrained embedding and the dataset
 3. Run following commands
 ```
-cd V0
 python preprocess.py (add '--clip_msra' if you need to train FLAT on MSRA NER dataset)
+cd V0 (without Bert) / V1 (with Bert)
 python flat_main.py --dataset <dataset_name> (ontonotes, msra, weibo or resume)
 ```
 
@@ -89,8 +89,8 @@ Numpy: 1.16.4
 2. 修改 `paths.py` 来添加预训练的 embedding 和你的数据集
 3. 运行下面的代码
 ```
-cd V0
 python preprocess.py (add '--clip_msra' if you need to train FLAT on MSRA NER dataset)
+cd V0 (without Bert) / V1 (with Bert)
 python flat_main.py --dataset <dataset_name> (ontonotes, msra, weibo or resume)
 ```
 
