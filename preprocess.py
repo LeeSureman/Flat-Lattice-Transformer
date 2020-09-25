@@ -1,3 +1,5 @@
+import sys
+sys.path.append('../')
 from paths import *
 import argparse
 parser = argparse.ArgumentParser()
@@ -22,7 +24,7 @@ for l in char_lines:
 
 def create_cliped_file(fp):
     f = open(fp,'r',encoding='utf-8')
-    fp_out = fp + '_clip1'
+    fp_out = fp + '_clip2'
     f_out = open(fp_out,'w',encoding='utf-8')
     now_example_len = 0
     # cliped_corpus = [[]]
@@ -65,13 +67,19 @@ def create_cliped_file(fp):
             now_example.append(line.strip())
 
     check = 0
+    max_length = 0
     for example in cliped_examples:
         if len(example)>200:
             print(len(example),''.join(map(lambda x:x.split(' ')[0],example)))
             check = 1
 
+        max_length = max(max_length,len(example))
+
+    print('最长的句子有:{}'.format(max_length))
+
     if check == 0:
         print('没句子超过200的长度')
+
 
 if args.clip_msra:
     create_cliped_file('{}/train_dev.char.bmes'.format(msra_ner_cn_path))

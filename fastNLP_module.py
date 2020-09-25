@@ -12,6 +12,9 @@ import torch.nn as nn
 from fastNLP.core import logger
 from fastNLP.modules.utils import _get_file_name_base_on_postfix
 from utils import MyDropout
+from fastNLP.embeddings.contextual_embedding import ContextualEmbedding
+from fastNLP.embeddings.bert_embedding import _WordBertModel
+from fastNLP.io.file_utils import PRETRAINED_BERT_MODEL_DIR
 
 class StaticEmbedding(TokenEmbedding):
     """
@@ -295,4 +298,126 @@ class StaticEmbedding(TokenEmbedding):
         words = self.drop_word(words)
         words = self.embedding(words)
         words = self.dropout(words)
+        return words
+
+
+class BertEmbedding(ContextualEmbedding):
+    """
+    使用BERT对words进行编码的Embedding。建议将输入的words长度限制在430以内，而不要使用512(根据预训练模型参数，可能有变化)。这是由于
+    预训练的bert模型长度限制为512个token，而因为输入的word是未进行word piece分割的(word piece的分割有BertEmbedding在输入word
+    时切分)，在分割之后长度可能会超过最大长度限制。
+
+    BertEmbedding可以支持自动下载权重，当前支持的模型有以下的几种(待补充):
+
+    Example::
+
+        >>> import torch
+        >>> from fastNLP import Vocabulary
+        >>> from fastNLP.embeddings import BertEmbedding
+        >>> vocab = Vocabulary().add_word_lst("The whether is good .".split())
+        >>> embed = BertEmbedding(vocab, model_dir_or_name='en-base-uncased', requires_grad=False, layers='4,-2,-1')
+        >>> words = torch.LongTensor([[vocab.to_index(word) for word in "The whether is good .".split()]])
+        >>> outputs = embed(words)
+        >>> outputs.size()
+        >>> # torch.Size([1, 5, 2304])
+    """
+
+    def __init__(self, vocab: Vocabulary, model_dir_or_name: str = 'en-base-uncased', layers: str = '-1',
+                 pool_method: str = 'first', word_dropout=0, dropout=0, include_cls_sep: bool = False,
+                 pooled_cls=True, requires_grad: bool = True, auto_truncate: bool = False):
+        """
+
+        :param ~fastNLP.Vocabulary vocab: 词表
+        :param str model_dir_or_name: 模型所在目录或者模型的名称。当传入模型所在目录时，目录中应该包含一个词表文件(以.txt作为后缀名),
+            权重文件(以.bin作为文件后缀名), 配置文件(以.json作为后缀名)。
+        :param str layers: 输出embedding表示来自于哪些层，不同层的结果按照layers中的顺序在最后一维concat起来。以','隔开层数，层的序号是
+            从0开始，可以以负数去索引倒数几层。
+        :param str pool_method: 因为在bert中，每个word会被表示为多个word pieces, 当获取一个word的表示的时候，怎样从它的word pieces
+            中计算得到它对应的表示。支持 ``last`` , ``first`` , ``avg`` , ``max``。
+        :param float word_dropout: 以多大的概率将一个词替换为unk。这样既可以训练unk也是一定的regularize。
+        :param float dropout: 以多大的概率对embedding的表示进行Dropout。0.1即随机将10%的值置为0。
+        :param bool include_cls_sep: bool，在bert计算句子的表示的时候，需要在前面加上[CLS]和[SEP], 是否在结果中保留这两个内容。 这样
+            会使得word embedding的结果比输入的结果长两个token。如果该值为True，则在使用 :class::StackEmbedding 可能会与其它类型的
+            embedding长度不匹配。
+        :param bool pooled_cls: 返回的[CLS]是否使用预训练中的BertPool映射一下，仅在include_cls_sep时有效。如果下游任务只取[CLS]做预测，
+            一般该值为True。
+        :param bool requires_grad: 是否需要gradient以更新Bert的权重。
+        :param bool auto_truncate: 当句子words拆分为word pieces长度超过bert最大允许长度(一般为512), 自动截掉拆分后的超过510个
+            word pieces后的内容，并将第512个word piece置为[SEP]。超过长度的部分的encode结果直接全部置零。一般仅有只使用[CLS]
+            来进行分类的任务将auto_truncate置为True。
+        """
+        super(BertEmbedding, self).__init__(vocab, word_dropout=word_dropout, dropout=dropout)
+        self.device_cpu = torch.device('cpu')
+        if model_dir_or_name.lower() in PRETRAINED_BERT_MODEL_DIR:
+            if 'cn' in model_dir_or_name.lower() and pool_method not in ('first', 'last'):
+                logger.warning("For Chinese bert, pooled_method should choose from 'first', 'last' in order to achieve"
+                               " faster speed.")
+                warnings.warn("For Chinese bert, pooled_method should choose from 'first', 'last' in order to achieve"
+                              " faster speed.")
+        self.dropout_p = dropout
+        self._word_sep_index = None
+        if '[SEP]' in vocab:
+            self._word_sep_index = vocab['[SEP]']
+
+        self.model = _WordBertModel(model_dir_or_name=model_dir_or_name, vocab=vocab, layers=layers,
+                                    pool_method=pool_method, include_cls_sep=include_cls_sep,
+                                    pooled_cls=pooled_cls, auto_truncate=auto_truncate, min_freq=2)
+
+        self.requires_grad = requires_grad
+        self._embed_size = len(self.model.layers) * self.model.encoder.hidden_size
+
+    def _delete_model_weights(self):
+        del self.model
+
+    def forward(self, words):
+        """
+        计算words的bert embedding表示。计算之前会在每句话的开始增加[CLS]在结束增加[SEP], 并根据include_cls_sep判断要不要
+            删除这两个token的表示。
+
+        :param torch.LongTensor words: [batch_size, max_len]
+        :return: torch.FloatTensor. batch_size x max_len x (768*len(self.layers))
+        """
+        words = self.drop_word(words)
+        outputs = self._get_sent_reprs(words)
+        if outputs is not None:
+            if self.dropout_p >1e-5:
+                return self.dropout(outputs)
+            else:
+                return outputs
+        outputs = self.model(words)
+        # print(outputs.size())
+
+        outputs = torch.cat([*outputs], dim=-1)
+        # print(outputs.size())
+        # exit()
+        if self.dropout_p > 1e-5:
+            return self.dropout(outputs)
+        else:
+            return outputs
+
+    def drop_word(self, words):
+        """
+        按照设定随机将words设置为unknown_index。
+
+        :param torch.LongTensor words: batch_size x max_len
+        :return:
+        """
+        if self.word_dropout > 0 and self.training:
+            with torch.no_grad():
+                if self._word_sep_index:  # 不能drop sep
+                    sep_mask = words.eq(self._word_sep_index)
+
+                mask = torch.full(words.size(), fill_value=self.word_dropout, dtype=torch.float)
+                # print(mask.device)
+                # print(mask)
+                # print(mask.device)
+                # exit()
+                # mask = mask.to(self.device_cpu)
+                mask = torch.bernoulli(mask).eq(1)  # dropout_word越大，越多位置为1
+                mask = mask.to(words.device)
+                pad_mask = words.ne(0)
+                mask = pad_mask.__and__(mask)  # pad的位置不为unk
+                words = words.masked_fill(mask, self._word_unk_index)
+                if self._word_sep_index:
+                    words.masked_fill_(sep_mask, self._word_sep_index)
         return words

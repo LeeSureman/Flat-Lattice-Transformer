@@ -1,5 +1,5 @@
 import fitlog
-use_fitlog = False
+use_fitlog = True
 if not use_fitlog:
     fitlog.debug()
 fitlog.set_log_dir('logs')
@@ -14,35 +14,51 @@ from paths import *
 from fastNLP.core import Trainer
 # from trainer import Trainer
 from fastNLP.core import Callback
-from V0.models import Lattice_Transformer_SeqLabel, Transformer_SeqLabel
+from V1.models import Lattice_Transformer_SeqLabel, Transformer_SeqLabel
 import torch
 import collections
 import torch.optim as optim
 import torch.nn as nn
 from fastNLP import LossInForward
 from fastNLP.core.metrics import SpanFPreRecMetric,AccuracyMetric
-from fastNLP.core.callback import WarmupCallback,GradientClipCallback,EarlyStopCallback,FitlogCallback
+from fastNLP.core.callback import WarmupCallback,GradientClipCallback,EarlyStopCallback
+from fastNLP import FitlogCallback
+# from fitlogcallback import FitlogCallback
+# from my_fitlog_callback import FitlogCallback
 from fastNLP import LRScheduler
 from torch.optim.lr_scheduler import LambdaLR
 # from models import LSTM_SeqLabel,LSTM_SeqLabel_True
+import fitlog
 from fastNLP import logger
 from utils import get_peking_time
-from V0.add_lattice import equip_chinese_ner_with_lexicon
+from V1.add_lattice import equip_chinese_ner_with_lexicon
 from load_data import load_toy_ner
 
 import traceback
 import warnings
 import sys
-
 from utils import print_info
+# from fastNLP.embeddings import BertEmbedding
+from fastNLP_module import BertEmbedding
+from V1.models import BERT_SeqLabel
 
 
-
+# def warn_with_traceback(message, category, filename, lineno, file=None, line=None):
+#
+#     log = file if hasattr(file,'write') else sys.stderr
+#     traceback.print_stack(file=log)
+#     log.write(warnings.formatwarning(message, category, filename, lineno, line))
+# warnings.showwarning = warn_with_traceback
 
 parser = argparse.ArgumentParser()
-
-parser.add_argument('--status',default='train',choices=['train'])
-parser.add_argument('--msg',default='_')
+# performance inrelevant
+parser.add_argument('--update_every',type=int,default=1)
+parser.add_argument('--status',choices=['train','test'],default='train')
+parser.add_argument('--use_bert',type=int,default=1)
+parser.add_argument('--only_bert',type=int,default=0)
+parser.add_argument('--fix_bert_epoch',type=int,default=20)
+parser.add_argument('--after_bert',default='mlp',choices=['lstm','mlp'])
+parser.add_argument('--msg',default='11266')
 parser.add_argument('--train_clip',default=False,help='是不是要把train的char长度限制在200以内')
 parser.add_argument('--device', default='0')
 parser.add_argument('--debug', default=0,type=int)
@@ -50,12 +66,11 @@ parser.add_argument('--gpumm',default=False,help='查看显存')
 parser.add_argument('--see_convergence',default=False)
 parser.add_argument('--see_param',default=False)
 parser.add_argument('--test_batch', default=-1)
-parser.add_argument('--seed', default=11242019,type=int)
+parser.add_argument('--seed', default=1080956,type=int)
 parser.add_argument('--test_train',default=False)
 parser.add_argument('--number_normalized',type=int,default=0,
                     choices=[0,1,2,3],help='0不norm，1只norm char,2norm char和bigram，3norm char，bigram和lattice')
 parser.add_argument('--lexicon_name',default='yj',choices=['lk','yj'])
-parser.add_argument('--update_every',default=1,type=int)
 parser.add_argument('--use_pytorch_dropout',type=int,default=0)
 
 parser.add_argument('--char_min_freq',default=1,type=int)
@@ -68,11 +83,12 @@ parser.add_argument('--only_lexicon_in_train',default=False)
 parser.add_argument('--word_min_freq',default=1,type=int)
 
 # hyper of training
-# parser.add_argument('--early_stop',default=40,type=int)
+parser.add_argument('--early_stop',default=25,type=int)
 parser.add_argument('--epoch', default=100, type=int)
 parser.add_argument('--batch', default=10, type=int)
 parser.add_argument('--optim', default='sgd', help='sgd|adam')
-parser.add_argument('--lr', default=1e-3, type=float)
+parser.add_argument('--lr', default=6e-4, type=float)
+parser.add_argument('--bert_lr_rate',default=0.05,type=float)
 parser.add_argument('--embed_lr_rate',default=1,type=float)
 parser.add_argument('--momentum', default=0.9)
 parser.add_argument('--init',default='uniform',help='norm|uniform')
@@ -84,7 +100,7 @@ parser.add_argument('--norm_lattice_embed',default=True)
 parser.add_argument('--warmup',default=0.1,type=float)
 
 # hyper of model
-parser.add_argument('--use_bert',type=int)
+# parser.add_argument('--use_bert',type=int,default=1)
 parser.add_argument('--model',default='transformer',help='lstm|transformer')
 parser.add_argument('--lattice',default=1,type=int)
 parser.add_argument('--use_bigram', default=1,type=int)
@@ -143,7 +159,10 @@ parser.add_argument('--abs_pos_fusion_func',default='nonlinear_add',
 
 
 
-parser.add_argument('--dataset', default='weibo', help='weibo|resume|ontonote|msra')
+parser.add_argument('--dataset', default='ontonotes', help='weibo|resume|ontonotes|msra')
+# parser.add_argument('--debug',default=1)
+
+
 
 args = parser.parse_args()
 if args.ff_dropout_2 < 0:
@@ -159,10 +178,11 @@ if over_all_dropout>0:
 
 
 
-if args.lattice and args.use_rel_pos and args.update_every == 1:
+if args.lattice and args.use_rel_pos:
     args.train_clip = True
 
-
+# fitlog.commit(__file__,fit_msg='绝对位置用新的了')
+fitlog.set_log_dir('logs')
 now_time = get_peking_time()
 logger.add_file('log/{}'.format(now_time),level='info')
 if args.test_batch == -1:
@@ -179,15 +199,37 @@ if args.device!='cpu':
 else:
     device = torch.device('cpu')
 
-refresh_data = True
-# import random
-# print('**'*12,random.random,'**'*12)
+refresh_data = False
 
 
 for k,v in args.__dict__.items():
     print_info('{}:{}'.format(k,v))
 
+# if args.dataset == 'ontonote':
+#     datasets, vocabs, embeddings = load_ontonotes4ner(ontonote4ner_cn_path, yangjie_rich_pretrain_unigram_path,
+#                                                       yangjie_rich_pretrain_bigram_path,
+#                                                       _refresh=refresh_data, index_token=True,
+#                                                       )
+# elif args.dataset == 'resume':
+#     datasets, vocabs, embeddings = load_resume_ner(resume_ner_path, yangjie_rich_pretrain_unigram_path,
+#                                                    yangjie_rich_pretrain_bigram_path,
+#                                                    _refresh=refresh_data, index_token=True,
+#                                                    )
+# elif args.dataset == 'weibo':
+#     datasets, vocabs, embeddings = load_weibo_ner(weibo_ner_path, yangjie_rich_pretrain_unigram_path,
+#                                                   yangjie_rich_pretrain_bigram_path,
+#                                                   _refresh=refresh_data, index_token=True,
+#                                                   )
+# elif args.dataset == 'weibo_old':
+#     datasets, vocabs, embeddings = load_weibo_ner_old(weibo_ner_old_path, yangjie_rich_pretrain_unigram_path,
+#                                                       yangjie_rich_pretrain_bigram_path,
+#                                                       _refresh=refresh_data, index_token=True,
+#                                                       )
 
+# print(max(datasets['train']['seq_len']))
+# print(max(datasets['dev']['seq_len']))
+# print(max(datasets['test']['seq_len']))
+# exit(0)
 
 raw_dataset_cache_name = os.path.join('cache',args.dataset+
                           '_trainClip:{}'.format(args.train_clip)
@@ -196,8 +238,8 @@ raw_dataset_cache_name = os.path.join('cache',args.dataset+
                                       +'word_min_freq_{}'.format(args.word_min_freq)
                                       +'only_train_min_freq{}'.format(args.only_train_min_freq)
                                       +'number_norm{}'.format(args.number_normalized)
-                                      +'load_dataset_seed{}'.format(load_dataset_seed)
-                                      )
+                                      + 'load_dataset_seed{}'.format(load_dataset_seed))
+
 
 if args.dataset == 'ontonotes':
     datasets,vocabs,embeddings = load_ontonotes4ner(ontonote4ner_cn_path,yangjie_rich_pretrain_unigram_path,yangjie_rich_pretrain_bigram_path,
@@ -223,6 +265,11 @@ elif args.dataset == 'weibo':
                                                 bigram_min_freq=args.bigram_min_freq,
                                                 only_train_min_freq=args.only_train_min_freq
                                                     )
+elif args.dataset == 'weibo_old':
+    datasets,vocabs,embeddings = load_weibo_ner_old(weibo_ner_old_path,yangjie_rich_pretrain_unigram_path,yangjie_rich_pretrain_bigram_path,
+                                                    _refresh=refresh_data,index_token=False,
+                                                    _cache_fp=raw_dataset_cache_name
+                                                    )
 
 elif args.dataset == 'toy':
     datasets,vocabs,embeddings = load_toy_ner(toy_ner_path,yangjie_rich_pretrain_unigram_path,yangjie_rich_pretrain_bigram_path,
@@ -230,9 +277,8 @@ elif args.dataset == 'toy':
                                                     _cache_fp=raw_dataset_cache_name
                                                     )
 
-
 elif args.dataset == 'msra':
-    datasets,vocabs,embeddings = load_msra_ner_1(msra_ner_cn_path,yangjie_rich_pretrain_unigram_path,
+    datasets,vocabs,embeddings = load_msra_ner_without_dev(msra_ner_cn_path,yangjie_rich_pretrain_unigram_path,
                                                            yangjie_rich_pretrain_bigram_path,
                                                            _refresh=refresh_data,index_token=False,train_clip=args.train_clip,
                                                            _cache_fp=raw_dataset_cache_name,
@@ -247,33 +293,24 @@ if args.gaz_dropout < 0:
 args.hidden = args.head_dim * args.head
 args.ff = args.hidden * args.ff
 
+# fitlog.add_hyper(args)
+
+
 if args.dataset == 'weibo':
-    args.ff_dropout = 0.3
-    args.ff_dropout_2 = 0.3
-    args.head_dim = 16
-    args.ff = 384
-    args.hidden = 128
-    args.init = 'uniform'
-    args.warmup = 0.1
-    args.epoch = 50
-    args.seed = 11741
+    pass
 
 elif args.dataset == 'resume':
-    args.head_dim = 16
-    args.ff = 384
-    args.hidden = 128
-    args.warmup = 0.01
-    args.lr = 8e-4
-    args.epoch = 50
-    args.seed = 15460
+    pass
 
 elif args.dataset == 'ontonotes':
-    args.seed = 17664
     args.update_every = 2
     pass
 
 elif args.dataset == 'msra':
     pass
+
+
+
 
 
 
@@ -291,7 +328,7 @@ w_list = load_yangjie_rich_pretrain_word_list(yangjie_rich_pretrain_word_path,
 cache_name = os.path.join('cache',(args.dataset+'_lattice'+'_only_train:{}'+
                           '_trainClip:{}'+'_norm_num:{}'
                                    +'char_min_freq{}'+'bigram_min_freq{}'+'word_min_freq{}'+'only_train_min_freq{}'
-                                   +'number_norm{}'+'lexicon_{}'+'load_dataset_seed{}')
+                                   +'number_norm{}'+'lexicon_{}'+'load_dataset_seed_{}')
                           .format(args.only_lexicon_in_train,
                           args.train_clip,args.number_normalized,args.char_min_freq,
                                   args.bigram_min_freq,args.word_min_freq,args.only_train_min_freq,
@@ -354,7 +391,45 @@ for k,v in datasets.items():
     print('{} max_lex_num:{}'.format(k, max_lex_num))
     print('{} max_seq_lex:{}'.format(k, max_seq_lex))
 
+# exit(1208)
 
+# pickle.dump(train_seq_lex,open('train_seq_lex','wb'))
+# pickle.dump(dev_seq_lex,open('dev_seq_lex','wb'))
+# pickle.dump(test_seq_lex,open('test_seq_lex','wb'))
+#
+# pickle.dump(train_seq,open('train_seq','wb'))
+# pickle.dump(dev_seq,open('dev_seq','wb'))
+# pickle.dump(test_seq,open('test_seq','wb'))
+# exit(1208)
+
+# avg_seq_len/=(len(datasets['train'])+len(datasets['dev'])+len(datasets['test']))
+# avg_lex_num/=(len(datasets['train'])+len(datasets['dev'])+len(datasets['test']))
+# avg_seq_lex/=(len(datasets['train'])+len(datasets['dev'])+len(datasets['test']))
+
+# #画图开始
+# import matplotlib.pyplot as plt
+# import numpy as np
+# import matplotlib
+# # matplotlib.rcParams['font.sans-serif']=['SimHei']   # 用黑体显示中文
+# # matplotlib.rcParams['axes.unicode_minus']=False     # 正常显示负号
+#
+# plt.hist(train_seq_lex, bins=40, normed=0, facecolor="blue", edgecolor="black", alpha=0.7)
+# # 显示横轴标签
+# plt.xlabel("区间")
+# # 显示纵轴标签
+# plt.ylabel("频数/频率")
+# # 显示图标题
+# plt.title("频数/频率分布直方图")
+# plt.show()
+#
+# print('avg_seq_len:{}'.format(avg_seq_len))
+# print('avg_lex_num:{}'.format(avg_lex_num))
+# print('avg_seq_lex:{}'.format(avg_seq_lex))
+# exit(1208)
+
+
+# max_seq_len = max(max(datasets['train']['seq_len']),max(datasets['dev']['seq_len']),max(datasets['test']['seq_len']))
+import copy
 max_seq_len = max(* map(lambda x:max(x['seq_len']),datasets.values()))
 
 show_index = 4
@@ -368,15 +443,19 @@ print('lex_e:{}'.format(list(datasets['train'][show_index]['lex_e'])))
 print('pos_s:{}'.format(list(datasets['train'][show_index]['pos_s'])))
 print('pos_e:{}'.format(list(datasets['train'][show_index]['pos_e'])))
 
-
-
+# exit(1208)
 
 for k, v in datasets.items():
-
+    # v.apply_field(lambda x:x,'chars',new_field_name='chars_target')
+    # v.set_pad_val('chars_target',pad_val=-100)
+    # print_info(v[0])
+    # v.set_input('chars_target')
+    # v.set_target('chars_target')
     if args.lattice:
         v.set_input('lattice','bigrams','seq_len','target')
         v.set_input('lex_num','pos_s','pos_e')
         v.set_target('target','seq_len')
+        v.set_pad_val('lattice',vocabs['lattice'].padding_idx)
     else:
         v.set_input('chars','bigrams','seq_len','target')
         v.set_target('target', 'seq_len')
@@ -397,7 +476,14 @@ if args.norm_lattice_embed>0:
         norm_static_embedding(v,args.norm_embed)
 
 
+# if args.norm_gaz_embed>0:
+#     print('embedding:{}'.format(embeddings['char'].embedding.weight.size()))
+#     print('norm embedding')
+#     for k,v in embeddings.items():
+#         norm_static_embedding(v,args.norm_embed)
 
+# print(embeddings['char'].embedding.weight[:10])
+# exit(1208)
 mode = {}
 mode['debug'] = args.debug
 mode['gpumm'] = args.gpumm
@@ -413,40 +499,53 @@ dropout['ff'] = args.ff_dropout
 dropout['ff_2'] = args.ff_dropout_2
 dropout['attn'] = args.attn_dropout
 
-
-# torch.backends.cudnn.benchmark = False
-# fitlog.set_rng_seed(args.seed)
-# torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.benchmark = False
+fitlog.set_rng_seed(args.seed)
+torch.backends.cudnn.benchmark = False
 
 
 fitlog.add_hyper(args)
 
 
+with torch.no_grad():
+    pass
+    # a = StaticEmbedding(22,2,2,2)
+    # a.embedding.weight.set_(a.weight*2)
+
+    # embeddings['char'].embedding.weight.set_(embeddings['char']*3)
+
 if args.model == 'transformer':
     if args.lattice:
-        model = Lattice_Transformer_SeqLabel(embeddings['lattice'], embeddings['bigram'], args.hidden, len(vocabs['label']),
-                                     args.head, args.layer, args.use_abs_pos,args.use_rel_pos,
-                                     args.learn_pos, args.add_pos,
-                                     args.pre, args.post, args.ff, args.scaled,dropout,args.use_bigram,
-                                     mode,device,vocabs,
-                                     max_seq_len=max_seq_len,
-                                     rel_pos_shared=args.rel_pos_shared,
-                                     k_proj=args.k_proj,
-                                     q_proj=args.q_proj,
-                                     v_proj=args.v_proj,
-                                     r_proj=args.r_proj,
-                                     self_supervised=args.self_supervised,
-                                     attn_ff=args.attn_ff,
-                                     pos_norm=args.pos_norm,
-                                     ff_activate=args.ff_activate,
-                                     abs_pos_fusion_func=args.abs_pos_fusion_func,
-                                     embed_dropout_pos=args.embed_dropout_pos,
-                                     four_pos_shared=args.four_pos_shared,
-                                     four_pos_fusion=args.four_pos_fusion,
-                                     four_pos_fusion_shared=args.four_pos_fusion_shared,
-                                     use_pytorch_dropout=args.use_pytorch_dropout
-
-                                     )
+        if args.use_bert:
+            bert_embedding = BertEmbedding(vocabs['lattice'],model_dir_or_name='cn-wwm',requires_grad=False,
+                                           word_dropout=0.01)
+        else:
+            bert_embedding = None
+        if args.only_bert:
+            model = BERT_SeqLabel(bert_embedding,len(vocabs['label']),vocabs,args.after_bert)
+        else:
+            model = Lattice_Transformer_SeqLabel(embeddings['lattice'], embeddings['bigram'], args.hidden, len(vocabs['label']),
+                                         args.head, args.layer, args.use_abs_pos,args.use_rel_pos,
+                                         args.learn_pos, args.add_pos,
+                                         args.pre, args.post, args.ff, args.scaled,dropout,args.use_bigram,
+                                         mode,device,vocabs,
+                                         max_seq_len=max_seq_len,
+                                         rel_pos_shared=args.rel_pos_shared,
+                                         k_proj=args.k_proj,
+                                         q_proj=args.q_proj,
+                                         v_proj=args.v_proj,
+                                         r_proj=args.r_proj,
+                                         self_supervised=args.self_supervised,
+                                         attn_ff=args.attn_ff,
+                                         pos_norm=args.pos_norm,
+                                         ff_activate=args.ff_activate,
+                                         abs_pos_fusion_func=args.abs_pos_fusion_func,
+                                         embed_dropout_pos=args.embed_dropout_pos,
+                                         four_pos_shared=args.four_pos_shared,
+                                         four_pos_fusion=args.four_pos_fusion,
+                                         four_pos_fusion_shared=args.four_pos_fusion_shared,
+                                         bert_embedding=bert_embedding
+                                         )
     else:
         model = Transformer_SeqLabel(embeddings['lattice'], embeddings['bigram'], args.hidden, len(vocabs['label']),
                                      args.head, args.layer, args.use_abs_pos,args.use_rel_pos,
@@ -478,11 +577,23 @@ elif args.model =='lstm':
 for n,p in model.named_parameters():
     print('{}:{}'.format(n,p.size()))
 
+# exit(1208)
 
+# for k,v in model.state_dict().items():
+#     # print(k,v)
+#     print('{}:{}'.format(k,v.size()))
+# exit(1208)
+# for mod in model.modules():
+#     print(mod)
+
+# print('的:{}'.format(embeddings['char'](vocabs['char'].to_index('的'))))
+# print('output layer:{}'.format(model.output.weight))
+
+# print('这次让pytorch默认初始化transformer')
 with torch.no_grad():
     print_info('{}init pram{}'.format('*'*15,'*'*15))
     for n,p in model.named_parameters():
-        if 'embedding' not in n and 'pos' not in n and 'pe' not in n \
+        if 'bert' not in n and 'embedding' not in n and 'pos' not in n and 'pe' not in n \
                 and 'bias' not in n and 'crf' not in n and p.dim()>1:
             try:
                 if args.init == 'uniform':
@@ -534,17 +645,70 @@ if args.see_convergence:
     trainer.train()
     exit(1208)
 
+# if args.warmup and args.model == 'transformer':
+#     ## warm up start
+#     if args.optim == 'adam':
+#         warmup_optimizer = optim.AdamW(model.parameters(),lr=args.warmup_lr,weight_decay=args.weight_decay)
+#     elif args.optim == 'sgd':
+#         warmup_optimizer = optim.SGD(model.parameters(),lr=args.warmup_lr,momentum=args.momentum)
+#
+#     warmup_lr_schedule = LRScheduler(lr_scheduler=LambdaLR(warmup_optimizer, lambda ep: 1 * (1 + 0.05)**ep))
+#     warmup_callbacks = [
+#         warmup_lr_schedule,
+#     ]
+#
+#     warmup_trainer = Trainer(datasets['train'],model,warmup_optimizer,loss,args.warmup_batch,
+#                       n_epochs=args.warmup_epoch,dev_data=datasets['dev'],metrics=metrics,
+#                       device=device,callbacks=warmup_lr_schedule,dev_batch_size=args.test_batch)
+#     warmup_result = warmup_trainer.train()
+#     print_info('warmup_eval:{}'.format(warmup_result))
+#     warmup_eval = warmup_result['best_eval']
+#     print_info('{}warmup result{}'.format('*' * 10, '*' * 10))
+#     for k,v in warmup_eval.items():
+#         for k_,v_ in v.items():
+#             fitlog.add_hyper(str(v_),'warmup-{}'.format(k_))
+#     # warm up end
+#     for k,v in warmup_result.items():
+#         if k == 'best_eval':
+#             for k_,v_ in v.items():
+#                 print_info('{}:{}'.format(k_,v_))
+#         else:
+#             print_info('{}:{}'.format(k,v))
+#
+#
+#     print_info('{}warmup finish!{}'.format('*'*10,'*'*10))
+# char_embedding_param = list(model.char_embed.parameters())
+if not args.only_bert:
+    if not args.use_bert:
+        bigram_embedding_param = list(model.bigram_embed.parameters())
+        gaz_embedding_param = list(model.lattice_embed.parameters())
+        embedding_param = bigram_embedding_param
+        if args.lattice:
+            gaz_embedding_param = list(model.lattice_embed.parameters())
+            embedding_param = embedding_param+gaz_embedding_param
+        embedding_param_ids = list(map(id,embedding_param))
+        non_embedding_param = list(filter(lambda x:id(x) not in embedding_param_ids,model.parameters()))
+        param_ = [{'params': non_embedding_param}, {'params': embedding_param, 'lr': args.lr * args.embed_lr_rate}]
+    else:
+        bert_embedding_param = list(model.bert_embedding.parameters())
+        bert_embedding_param_ids = list(map(id,bert_embedding_param))
+        bigram_embedding_param = list(model.bigram_embed.parameters())
+        gaz_embedding_param = list(model.lattice_embed.parameters())
+        embedding_param = bigram_embedding_param
+        if args.lattice:
+            gaz_embedding_param = list(model.lattice_embed.parameters())
+            embedding_param = embedding_param+gaz_embedding_param
+        embedding_param_ids = list(map(id,embedding_param))
+        non_embedding_param = list(filter(
+            lambda x:id(x) not in embedding_param_ids and id(x) not in bert_embedding_param_ids,
+                                          model.parameters()))
+        param_ = [{'params': non_embedding_param}, {'params': embedding_param, 'lr': args.lr * args.embed_lr_rate},
+                  {'params':bert_embedding_param,'lr':args.bert_lr_rate*args.lr}]
+else:
+    non_embedding_param = model.parameters()
+    embedding_param = []
+    param_ = [{'params': non_embedding_param}, {'params': embedding_param, 'lr': args.lr * args.embed_lr_rate}]
 
-bigram_embedding_param = list(model.bigram_embed.parameters())
-gaz_embedding_param = list(model.lattice_embed.parameters())
-embedding_param = bigram_embedding_param
-if args.lattice:
-    gaz_embedding_param = list(model.lattice_embed.parameters())
-    embedding_param = embedding_param+gaz_embedding_param
-embedding_param_ids = list(map(id,embedding_param))
-non_embedding_param = list(filter(lambda x:id(x) not in embedding_param_ids,model.parameters()))
-
-param_ = [{'params':non_embedding_param},{'params':embedding_param,'lr':args.lr*args.embed_lr_rate}]
 
 
 
@@ -556,36 +720,41 @@ elif args.optim == 'sgd':
     optimizer = optim.SGD(param_,lr=args.lr,momentum=args.momentum,
                           weight_decay=args.weight_decay)
 
-if 'msra' in args.dataset :
+if args.dataset == 'msra':
     datasets['dev']  = datasets['test']
-
 fitlog_evaluate_dataset = {'test':datasets['test']}
 if args.test_train:
     fitlog_evaluate_dataset['train'] = datasets['train']
 evaluate_callback = FitlogCallback(fitlog_evaluate_dataset,verbose=1)
 lrschedule_callback = LRScheduler(lr_scheduler=LambdaLR(optimizer, lambda ep: 1 / (1 + 0.05*ep) ))
 clip_callback = GradientClipCallback(clip_type='value', clip_value=5)
-# model.state_dict()
-class CheckWeightCallback(Callback):
-    def __init__(self,model):
-        super().__init__()
-        self.model_ = model
 
-    def on_step_end(self):
-        print('parameter weight:',flush=True)
-        print(self.model_.state_dict()['encoder.layer_0.attn.w_q.weight'],flush=True)
+class Unfreeze_Callback(Callback):
+    def __init__(self,bert_embedding,fix_epoch_num):
+        super().__init__()
+        self.bert_embedding = bert_embedding
+        self.fix_epoch_num = fix_epoch_num
+        assert self.bert_embedding.requires_grad == False
+
+    def on_epoch_begin(self):
+        if self.epoch == self.fix_epoch_num+1:
+            self.bert_embedding.requires_grad = True
+
+
 
 
 
 callbacks = [
         evaluate_callback,
         lrschedule_callback,
-        clip_callback,
-        # CheckWeightCallback(model)
-]
-
-print('parameter weight:')
-print(model.state_dict()['encoder.layer_0.attn.w_q.weight'])
+        clip_callback
+    ]
+if args.use_bert:
+    if args.fix_bert_epoch != 0:
+        callbacks.append(Unfreeze_Callback(bert_embedding,args.fix_bert_epoch))
+    else:
+        bert_embedding.requires_grad = True
+callbacks.append(EarlyStopCallback(args.early_stop))
 if args.warmup > 0 and args.model == 'transformer':
     callbacks.append(WarmupCallback(warmup=args.warmup))
 
@@ -599,19 +768,20 @@ class record_best_test_callback(Callback):
     def on_valid_end(self, eval_result, metric_key, optimizer, better_result):
         print(eval_result['data_test']['SpanFPreRecMetric']['f'])
 
+print(torch.rand(size=[3,3],device=device))
 
+
+# if args.debug:
+#     datasets['train'] = datasets['train'][:200]
 
 
 if args.status == 'train':
-    trainer = Trainer(datasets['train'],model,optimizer,loss,
-                      args.batch//args.update_every,
-                      update_every=args.update_every,
+    trainer = Trainer(datasets['train'],model,optimizer,loss,args.batch,
                       n_epochs=args.epoch,
                       dev_data=datasets['dev'],
                       metrics=metrics,
                       device=device,callbacks=callbacks,dev_batch_size=args.test_batch,
-                      test_use_tqdm=False,
-                      print_every=5,
-                      check_code_level=-1)
+                      test_use_tqdm=False,check_code_level=-1,
+                      update_every=args.update_every)
 
     trainer.train()

@@ -6,6 +6,7 @@ import fitlog
 import pickle
 import os
 from fastNLP import cache_results
+# from fastNLP.embeddings import StaticEmbedding
 from fastNLP_module import StaticEmbedding
 
 
