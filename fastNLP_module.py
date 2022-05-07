@@ -10,10 +10,10 @@ import torch
 import torch.nn as nn
 
 from fastNLP.core import logger
-from fastNLP.modules.utils import _get_file_name_base_on_postfix
+#from fastNLP.modules.utils import _get_file_name_base_on_postfix
 from utils import MyDropout
 from fastNLP.embeddings.contextual_embedding import ContextualEmbedding
-from fastNLP.embeddings.bert_embedding import _WordBertModel
+#from fastNLP.embeddings.bert_embedding import _WordBertModel
 from fastNLP.io.file_utils import PRETRAINED_BERT_MODEL_DIR
 
 class StaticEmbedding(TokenEmbedding):
